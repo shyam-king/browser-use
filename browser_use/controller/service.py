@@ -332,6 +332,41 @@ class Controller:
 				logger.info(msg)
 				return ActionResult(extracted_content=msg, include_in_memory=True)
 
+
+		@self.registry.action(
+			description='Extract links of all interactive elements',
+			requires_browser=True,
+		)
+		async def extract_interactive_links(
+			browser: BrowserContext,
+		) -> ActionResult:
+			current_state = await browser.get_state()
+			selector_map = current_state.selector_map
+
+			interactive_links_map: dict[int, dict[str, str]] = {}
+
+			for index, node in selector_map.items():
+				attributes = node.attributes
+				for key, value in attributes.items():
+					relevant_attributes: dict[str, str] = {}
+					if "href" in key.lower():
+						relevant_attributes[key] = value
+
+					if len(relevant_attributes) > 0:
+						interactive_links_map[index] = relevant_attributes
+
+			def format_interactive_link(index: int, attributes: dict[str, str]) -> str:
+				return f'index {index}: {json.dumps(attributes)}'
+
+			formatted_links = "\n".join([format_interactive_link(i, a) for i,a in interactive_links_map.items()])
+			if len(interactive_links_map) == 0:
+				formatted_links = "No interactive links found"
+
+			msg = f'📄  Extracted links (index of the element with their corresponding attributes):\n {formatted_links}'
+			logger.info(msg)
+			return ActionResult(extracted_content=msg)
+
+
 		@self.registry.action(
 			description='Select dropdown option for interactive element index by the text of the option you want to select',
 			requires_browser=True,
