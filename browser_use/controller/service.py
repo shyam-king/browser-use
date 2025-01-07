@@ -289,7 +289,7 @@ class Controller:
 								
 								return {
 									options: Array.from(select.options).map(opt => ({
-										text: opt.text.trim(),
+										text: opt.text, //do not trim, because we are doing exact match in select_dropdown_option
 										value: opt.value,
 										index: opt.index
 									})),
@@ -307,9 +307,11 @@ class Controller:
 
 							formatted_options = []
 							for opt in options['options']:
-								encoded_value = json.dumps(opt['value'])
+								# encoding ensures AI uses the exact string in select_dropdown_option
+								encoded_text = json.dumps(opt["text"])
+								encoded_value = json.dumps(opt["value"])
 								formatted_options.append(
-									f"{opt['index']}: {opt['text']} (value={encoded_value})"
+									f"{opt['index']}: text={encoded_text} value={encoded_value}"
 								)
 
 							all_options.extend(formatted_options)
@@ -370,12 +372,12 @@ class Controller:
 
 
 		@self.registry.action(
-			description='Select dropdown option for interactive element index by the value of the option you want to select',
+			description='Select dropdown option for interactive element index by the text of the option you want to select',
 			requires_browser=True,
 		)
 		async def select_dropdown_option(
 			index: int,
-			value: str,
+			text: str,
 			browser: BrowserContext,
 		) -> ActionResult:
 			"""Select dropdown option by the text of the option you want to select"""
@@ -391,11 +393,9 @@ class Controller:
 				msg = f'Cannot select option: Element with index {index} is a {dom_element.tag_name}, not a select'
 				return ActionResult(extracted_content=msg, include_in_memory=True)
 
-			logger.debug(f"Attempting to select '{value}' using xpath: {dom_element.xpath}")
+			logger.debug(f"Attempting to select '{text}' using xpath: {dom_element.xpath}")
 			logger.debug(f'Element attributes: {dom_element.attributes}')
 			logger.debug(f'Element tag: {dom_element.tag_name}')
-
-			xpath = "//" + dom_element.xpath
 
 			try:
 				frame_index = 0
@@ -444,9 +444,9 @@ class Controller:
 
 							# "label" because we are selecting by text
 							# nth(0) to disable error thrown by strict mode
-							selected_option_values = await frame.locator("//" + dom_element.xpath).nth(0).select_option(value=value) 
+							selected_option_values = await frame.locator("//" + dom_element.xpath).nth(0).select_option(label=text) 
 
-							msg = f"selected option with value {selected_option_values}"
+							msg = f"selected option {text} with value {selected_option_values}"
 							logger.info(msg + f' in frame {frame_index}')
 
 							return ActionResult(extracted_content=msg, include_in_memory=True)
@@ -458,7 +458,7 @@ class Controller:
 
 					frame_index += 1
 
-				msg = f"Could not select option '{value}' in any frame, use get_dropdown_options action to get list of options for a select element"
+				msg = f"Could not select option '{text}' in any frame, use get_dropdown_options action to get list of options for a select element"
 				logger.info(msg)
 				return ActionResult(extracted_content=msg, include_in_memory=True)
 
