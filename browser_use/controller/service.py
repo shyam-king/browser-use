@@ -460,7 +460,7 @@ class Controller:
 
 					frame_index += 1
 
-				msg = f"Could not select option '{text}' in any frame"
+				msg = f"Could not select option '{text}' in any frame, use get_dropdown_options action to get list of options for a select element"
 				logger.info(msg)
 				return ActionResult(extracted_content=msg, include_in_memory=True)
 
