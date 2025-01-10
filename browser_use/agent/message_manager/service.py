@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 import logging
 from datetime import datetime
 from typing import List, Optional, Type
@@ -20,6 +21,11 @@ from browser_use.browser.views import BrowserState
 
 logger = logging.getLogger(__name__)
 
+class MessageTypes(Enum):
+	SYSTEM_MESSAGE = "system_message"
+	STATE = "state"
+	AI_RESPONSE = "ai_response"
+	ACTION_RESULT = "action_result"
 
 class MessageManager:
 	def __init__(
@@ -40,6 +46,7 @@ class MessageManager:
 		self.system_prompt_class = system_prompt_class
 		self.max_input_tokens = max_input_tokens
 		self.history = MessageHistory()
+		self.history_message_types: List[MessageTypes] = []
 		self.task = task
 		self.action_descriptions = action_descriptions
 		self.ESTIMATED_TOKENS_PER_CHARACTER = estimated_tokens_per_character
@@ -53,7 +60,7 @@ class MessageManager:
 			max_actions_per_step=max_actions_per_step,
 		).get_system_message()
 
-		self._add_message_with_tokens(system_message)
+		self._add_message_with_tokens(system_message, MessageTypes.SYSTEM_MESSAGE)
 		self.system_prompt = system_message
 		self.tool_call_in_content = tool_call_in_content
 		tool_calls = [
@@ -83,10 +90,31 @@ class MessageManager:
 				tool_calls=tool_calls,
 			)
 
-		self._add_message_with_tokens(example_tool_call)
+		self._add_message_with_tokens(example_tool_call, MessageTypes.AI_RESPONSE)
 
 		task_message = HumanMessage(content=f'Your task is: {task}')
-		self._add_message_with_tokens(task_message)
+		self._add_message_with_tokens(task_message, MessageTypes.ACTION_RESULT)
+	
+	def _shorten_previous_state_history(self):
+		keep_array = [True] * len(self.history_message_types)
+		n_state_message = 0
+		for i in reversed(range(len(self.history_message_types))): 
+			if self.history_message_types[i] == MessageTypes.STATE:
+				n_state_message += 1
+
+			if n_state_message > 1:
+				keep_array[i] = False
+
+		old_history = self.history
+		old_history_message_types = self.history_message_types
+
+		self.history = MessageHistory()
+		self.history_message_types = []
+
+		for i, keep in enumerate(keep_array):
+			if keep:
+				self._add_message_with_tokens(old_history.messages[i].message, old_history_message_types[i])
+
 
 	def add_state_message(
 		self,
@@ -96,18 +124,20 @@ class MessageManager:
 	) -> None:
 		"""Add browser state as human message"""
 
+		self._shorten_previous_state_history()
+
 		# if keep in memory, add to directly to history and add state without result
 		if result:
 			for r in result:
 				if r.include_in_memory:
 					if r.extracted_content:
 						msg = HumanMessage(content='Action result: ' + str(r.extracted_content))
-						self._add_message_with_tokens(msg)
+						self._add_message_with_tokens(msg, MessageTypes.ACTION_RESULT)
 					if r.error:
 						msg = HumanMessage(
 							content='Action error: ' + str(r.error)[-self.max_error_length :]
 						)
-						self._add_message_with_tokens(msg)
+						self._add_message_with_tokens(msg, MessageTypes.ACTION_RESULT)
 					result = None  # if result in history, we dont want to add it again
 
 		# otherwise add state message and result to next message (which will not stay in memory)
@@ -118,7 +148,7 @@ class MessageManager:
 			max_error_length=self.max_error_length,
 			step_info=step_info,
 		).get_user_message()
-		self._add_message_with_tokens(state_message)
+		self._add_message_with_tokens(state_message, MessageTypes.STATE)
 
 	def _remove_last_state_message(self) -> None:
 		"""Remove last state message from history"""
@@ -148,7 +178,7 @@ class MessageManager:
 				tool_calls=tool_calls,
 			)
 
-		self._add_message_with_tokens(msg)
+		self._add_message_with_tokens(msg, MessageTypes.AI_RESPONSE)
 
 	def get_messages(self) -> List[BaseMessage]:
 		"""Get current message list, potentially trimmed to max tokens"""
@@ -204,7 +234,9 @@ class MessageManager:
 
 		# new message with updated content
 		msg = HumanMessage(content=content)
-		self._add_message_with_tokens(msg)
+
+		# add_to_message_type_history=False because we are deleting and inserting it back
+		self._add_message_with_tokens(msg, MessageTypes.STATE, add_to_message_type_history=False)
 
 		last_msg = self.history.messages[-1]
 
@@ -212,11 +244,12 @@ class MessageManager:
 			f'Added message with {last_msg.metadata.input_tokens} tokens - total tokens now: {self.history.total_tokens}/{self.max_input_tokens} - total messages: {len(self.history.messages)}'
 		)
 
-	def _add_message_with_tokens(self, message: BaseMessage) -> None:
+	def _add_message_with_tokens(self, message: BaseMessage, message_type: MessageTypes, add_to_message_type_history = True) -> None:
 		"""Add message with token count metadata"""
 		token_count = self._count_tokens(message)
 		metadata = MessageMetadata(input_tokens=token_count)
 		self.history.add_message(message, metadata)
+		if add_to_message_type_history: self.history_message_types.append(message_type)
 
 	def _count_tokens(self, message: BaseMessage) -> int:
 		"""Count tokens in a message using the model's tokenizer"""

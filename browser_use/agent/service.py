@@ -176,7 +176,7 @@ class Agent:
 			try:
 				model_output = await self.get_next_action(input_messages)
 				self._save_conversation(input_messages, model_output)
-				self.message_manager._remove_last_state_message()  # we dont want the whole state in the chat history
+				self.message_manager._shorten_previous_state_history()
 				self.message_manager.add_model_output(model_output)
 			except Exception as e:
 				# model call failed, remove last state message from history
