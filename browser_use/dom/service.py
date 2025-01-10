@@ -1,6 +1,7 @@
 import logging
 from importlib import resources
-from typing import Optional
+from typing import Coroutine, Optional, TypeVar
+import abc
 
 from playwright.async_api import Page
 
@@ -15,23 +16,28 @@ from browser_use.dom.views import (
 logger = logging.getLogger(__name__)
 
 
-class DomService:
-	def __init__(self, page: Page):
-		self.page = page
-		self.xpath_cache = {}
+class AbstractDomTreeBuilder(abc.ABC):
+	"""
+	A class that builds a DOM tree representation from a webpage.
 
-	# region - Clickable elements
-	async def get_clickable_elements(self, highlight_elements: bool = True) -> DOMState:
-		element_tree = await self._build_dom_tree(highlight_elements)
-		selector_map = self._create_selector_map(element_tree)
+	Methods:
+		build_dom_tree(page: Page, **kwargs) -> DOMElementNode:
+			Asynchronously builds the DOM tree from the given page.
+	"""
+	@abc.abstractmethod
+	async def build_dom_tree(self, page: Page, **kwargs) -> DOMElementNode:
+		pass
 
-		return DOMState(element_tree=element_tree, selector_map=selector_map)
+class DefaultDomTreeBuilder(AbstractDomTreeBuilder):
+	def __init__(self) -> None:
+		super().__init__()
+		self._js_code = resources.read_text('browser_use.dom', 'buildDomTree.js')
 
-	async def _build_dom_tree(self, highlight_elements: bool) -> DOMElementNode:
-		js_code = resources.read_text('browser_use.dom', 'buildDomTree.js')
+	async def build_dom_tree(self, page: Page, **kwargs) -> DOMElementNode:
+		highlight_elements = kwargs.get("highlight_elements", None) or False
 
-		eval_page = await self.page.evaluate(
-			js_code, [highlight_elements]
+		eval_page = await page.evaluate(
+			self._js_code, [highlight_elements]
 		)  # This is quite big, so be careful
 		html_to_dict = self._parse_node(eval_page)
 
@@ -39,20 +45,6 @@ class DomService:
 			raise ValueError('Failed to parse HTML to dictionary')
 
 		return html_to_dict
-
-	def _create_selector_map(self, element_tree: DOMElementNode) -> SelectorMap:
-		selector_map = {}
-
-		def process_node(node: DOMBaseNode):
-			if isinstance(node, DOMElementNode):
-				if node.highlight_index is not None:
-					selector_map[node.highlight_index] = node
-
-				for child in node.children:
-					process_node(child)
-
-		process_node(element_tree)
-		return selector_map
 
 	def _parse_node(
 		self,
@@ -96,5 +88,33 @@ class DomService:
 		element_node.children = children
 
 		return element_node
+
+class DomService:
+	def __init__(self, page: Page, dom_builder: Optional[AbstractDomTreeBuilder] = None):
+		self.page = page
+		self.dom_builder = dom_builder or DefaultDomTreeBuilder()
+		self.xpath_cache = {}
+
+	# region - Clickable elements
+	async def get_clickable_elements(self, highlight_elements: bool = True) -> DOMState:
+		element_tree = await self.dom_builder.build_dom_tree(self.page, highlight_elements=highlight_elements)
+		selector_map = self._create_selector_map(element_tree)
+
+		return DOMState(element_tree=element_tree, selector_map=selector_map)
+
+	def _create_selector_map(self, element_tree: DOMElementNode) -> SelectorMap:
+		selector_map = {}
+
+		def process_node(node: DOMBaseNode):
+			if isinstance(node, DOMElementNode):
+				if node.highlight_index is not None:
+					selector_map[node.highlight_index] = node
+
+				for child in node.children:
+					process_node(child)
+
+		process_node(element_tree)
+		return selector_map
+
 
 	# endregion

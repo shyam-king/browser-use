@@ -24,7 +24,7 @@ from playwright.async_api import (
 )
 
 from browser_use.browser.views import BrowserError, BrowserState, TabInfo
-from browser_use.dom.service import DomService
+from browser_use.dom.service import AbstractDomTreeBuilder, DomService
 from browser_use.dom.views import DOMElementNode, SelectorMap
 from browser_use.utils import time_execution_sync
 
@@ -77,6 +77,9 @@ class BrowserContextConfig:
 
 		trace_path: None
 			Path to save trace files. It will auto name the file with the TRACE_PATH/{context_id}.zip
+
+		custom_dom_builder: None
+			Custom dom builder to override the dom builder (affects how the current page is presented to the LLM)
 	"""
 
 	cookies_file: str | None = None
@@ -94,6 +97,8 @@ class BrowserContextConfig:
 
 	save_recording_path: str | None = None
 	trace_path: str | None = None
+
+	custom_dom_builder: Optional[AbstractDomTreeBuilder] = None
 
 
 @dataclass
@@ -568,7 +573,7 @@ class BrowserContext:
 
 		try:
 			await self.remove_highlights()
-			dom_service = DomService(page)
+			dom_service = DomService(page, dom_builder=self.config.custom_dom_builder)
 			content = await dom_service.get_clickable_elements()
 
 			screenshot_b64 = None
