@@ -174,12 +174,15 @@ class Browser:
 						'--no-default-browser-check',
 						'--no-startup-window',
 						'--window-position=0,0',
+						# TEMP
+						'--auto-open-devtools-for-tabs',
 						# '--window-size=1280,1000',
 					]
 					+ disable_security_args
 					+ self.config.extra_chromium_args,
 					proxy=self.config.proxy,
 				)
+
 
 				return browser
 			except Exception as e:
