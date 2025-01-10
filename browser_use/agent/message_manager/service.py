@@ -102,7 +102,7 @@ class MessageManager:
 			if self.history_message_types[i] == MessageTypes.STATE:
 				n_state_message += 1
 
-			if n_state_message > 1:
+			if n_state_message > 1 and self.history_message_types[i] == MessageTypes.STATE:
 				keep_array[i] = False
 
 		old_history = self.history
