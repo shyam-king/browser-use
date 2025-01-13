@@ -1,3 +1,8 @@
+# [EDGE branch warning]
+
+This branch is a testing ground for all new features from both upstream and this fork. Not guaranteed to perform without bugs.
+
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./static/browser-use-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="./static/browser-use.png">
