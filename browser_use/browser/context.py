@@ -834,6 +834,7 @@ class BrowserContext:
 			await element.scroll_into_view_if_needed(timeout=2500)
 			await element.fill('')
 			await element.type(text)
+			await element.press('Tab')
 			await page.wait_for_load_state()
 
 		except Exception as e:
