@@ -80,6 +80,18 @@ class BrowserContextConfig:
 
 		custom_dom_builder: None
 			Custom dom builder to override the dom builder (affects how the current page is presented to the LLM)
+
+		locale: None
+			Specify user locale, for example en-GB, de-DE, etc. Locale will affect navigator.language value, Accept-Language request header value as well as number and date formatting rules. If not provided, defaults to the system default locale.
+
+		user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.102 Safari/537.36'
+			custom user agent to use.
+
+		highlight_elements: True
+			Highlight elements in the DOM on the screen
+
+		viewport_expansion: 500
+			Viewport expansion in pixels. This amount will increase the number of elements which are included in the state what the LLM will see. If set to -1, all elements will be included (this leads to high token usage). If set to 0, only the elements which are visible in the viewport will be included.
 	"""
 
 	cookies_file: str | None = None
@@ -90,13 +102,18 @@ class BrowserContextConfig:
 
 	disable_security: bool = False
 
-	browser_window_size: BrowserContextWindowSize = field(
-		default_factory=lambda: {'width': 1280, 'height': 1100}
-	)
+	browser_window_size: BrowserContextWindowSize = field(default_factory=lambda: {'width': 1280, 'height': 1100})
 	no_viewport: Optional[bool] = None
 
 	save_recording_path: str | None = None
 	trace_path: str | None = None
+	locale: str | None = None
+	user_agent: str = (
+		'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36  (KHTML, like Gecko) Chrome/85.0.4183.102 Safari/537.36'
+	)
+
+	highlight_elements: bool = True
+	viewport_expansion: int = 500
 
 	custom_dom_builder: Optional[AbstractDomTreeBuilder] = None
 
@@ -145,9 +162,7 @@ class BrowserContext:
 
 			if self.config.trace_path:
 				try:
-					await self.session.context.tracing.stop(
-						path=os.path.join(self.config.trace_path, f'{self.context_id}.zip')
-					)
+					await self.session.context.tracing.stop(path=os.path.join(self.config.trace_path, f'{self.context_id}.zip'))
 				except Exception as e:
 					logger.debug(f'Failed to stop tracing: {e}')
 
@@ -192,9 +207,11 @@ class BrowserContext:
 			),
 			selector_map={},
 			url=page.url,
-			title=await page.title(),
+			title='',
 			screenshot=None,
 			tabs=[],
+			pixels_above=0,
+			pixels_below=0,
 		)
 
 		self.session = BrowserSession(
@@ -226,7 +243,9 @@ class BrowserContext:
 
 	async def _create_context(self, browser: PlaywrightBrowser):
 		"""Creates a new browser context with anti-detection measures and loads cookies if available."""
-		if self.browser.config.chrome_instance_path and len(browser.contexts) > 0:
+		if self.browser.config.cdp_url and len(browser.contexts) > 0:
+			context = browser.contexts[0]
+		elif self.browser.config.chrome_instance_path and len(browser.contexts) > 0:
 			# Connect to existing Chrome instance instead of creating new one
 			context = browser.contexts[0]
 		else:
@@ -234,14 +253,12 @@ class BrowserContext:
 			context = await browser.new_context(
 				viewport=self.config.browser_window_size,
 				no_viewport=False,
-				user_agent=(
-					'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-					'(KHTML, like Gecko) Chrome/85.0.4183.102 Safari/537.36'
-				),
+				user_agent=self.config.user_agent,
 				java_script_enabled=True,
 				bypass_csp=self.config.disable_security,
 				ignore_https_errors=self.config.disable_security,
 				record_video_dir=self.config.save_recording_path,
+				locale=self.config.locale,
 			)
 
 		if self.config.trace_path:
@@ -282,6 +299,12 @@ class BrowserContext:
 					Promise.resolve({ state: Notification.permission }) :
 					originalQuery(parameters)
 			);
+			(function () {
+				const originalAttachShadow = Element.prototype.attachShadow;
+				Element.prototype.attachShadow = function attachShadow(options) {
+					return originalAttachShadow.call(this, { ...options, mode: "open" });
+				};
+			})();
 			"""
 		)
 
@@ -440,10 +463,7 @@ class BrowserContext:
 			while True:
 				await asyncio.sleep(0.1)
 				now = asyncio.get_event_loop().time()
-				if (
-					len(pending_requests) == 0
-					and (now - last_activity) >= self.config.wait_for_network_idle_page_load_time
-				):
+				if len(pending_requests) == 0 and (now - last_activity) >= self.config.wait_for_network_idle_page_load_time:
 					break
 				if now - start_time > self.config.maximum_wait_page_load_time:
 					logger.debug(
@@ -457,9 +477,7 @@ class BrowserContext:
 			page.remove_listener('request', on_request)
 			page.remove_listener('response', on_response)
 
-		logger.debug(
-			f'Network stabilized for {self.config.wait_for_network_idle_page_load_time} seconds'
-		)
+		logger.debug(f'Network stabilized for {self.config.wait_for_network_idle_page_load_time} seconds')
 
 	async def _wait_for_page_and_frames_load(self, timeout_overwrite: float | None = None):
 		"""
@@ -482,9 +500,7 @@ class BrowserContext:
 		elapsed = time.time() - start_time
 		remaining = max((timeout_overwrite or self.config.minimum_wait_page_load_time) - elapsed, 0)
 
-		logger.debug(
-			f'--Page loaded in {elapsed:.2f} seconds, waiting for additional {remaining:.2f} seconds'
-		)
+		logger.debug(f'--Page loaded in {elapsed:.2f} seconds, waiting for additional {remaining:.2f} seconds')
 
 		# Sleep remaining time if needed
 		if remaining > 0:
@@ -549,7 +565,7 @@ class BrowserContext:
 
 		return session.cached_state
 
-	async def _update_state(self, use_vision: bool = False) -> BrowserState:
+	async def _update_state(self, use_vision: bool = False, focus_element: int = -1) -> BrowserState:
 		"""Update and return state."""
 		session = await self.get_session()
 
@@ -572,12 +588,16 @@ class BrowserContext:
 		try:
 			await self.remove_highlights()
 			dom_service = DomService(page, dom_builder=self.config.custom_dom_builder)
-			content = await dom_service.get_clickable_elements()
+			content = await dom_service.get_clickable_elements(
+				focus_element=focus_element,
+				viewport_expansion=self.config.viewport_expansion,
+				highlight_elements=self.config.highlight_elements,
+			)
 
 			screenshot_b64 = None
 			if use_vision:
 				screenshot_b64 = await self.take_screenshot()
-
+			pixels_above, pixels_below = await self.get_scroll_info(page)
 			self.current_state = BrowserState(
 				element_tree=content.element_tree,
 				selector_map=content.selector_map,
@@ -585,6 +605,8 @@ class BrowserContext:
 				title=await page.title(),
 				tabs=await self.get_tabs_info(),
 				screenshot=screenshot_b64,
+				pixels_above=pixels_above,
+				pixels_below=pixels_below,
 			)
 
 			return self.current_state
@@ -677,7 +699,7 @@ class BrowserContext:
 						# Handle numeric indices
 						if idx.isdigit():
 							index = int(idx) - 1
-							base_part += f':nth-of-type({index+1})'
+							base_part += f':nth-of-type({index + 1})'
 						# Handle last() function
 						elif idx == 'last()':
 							base_part += ':last-of-type'
@@ -779,9 +801,12 @@ class BrowserContext:
 				# Handle different value cases
 				if value == '':
 					css_selector += f'[{safe_attribute}]'
-				elif any(char in value for char in '"\'<>`'):
+				elif any(char in value for char in '"\'<>`\n\r\t'):
 					# Use contains for values with special characters
-					safe_value = value.replace('"', '\\"')
+					# Regex-substitute *any* whitespace with a single space, then strip.
+					collapsed_value = re.sub(r'\s+', ' ', value).strip()
+					# Escape embedded double-quotes.
+					safe_value = collapsed_value.replace('"', '\\"')
 					css_selector += f'[{safe_attribute}*="{safe_value}"]'
 				else:
 					css_selector += f'[{safe_attribute}="{value}"]'
@@ -803,13 +828,13 @@ class BrowserContext:
 			parent = current.parent
 			parents.append(parent)
 			current = parent
-			if parent.tag_name == 'iframe':
-				break
 
-		# There can be only one iframe parent (by design of the loop above)
-		iframe_parent = [item for item in parents if item.tag_name == 'iframe']
-		if iframe_parent:
-			parent = iframe_parent[0]
+		# Reverse the parents list to process from top to bottom
+		parents.reverse()
+
+		# Process all iframe parents in sequence
+		iframes = [item for item in parents if item.tag_name == 'iframe']
+		for parent in iframes:
 			css_selector = self._enhanced_css_selector_for_element(parent)
 			current_frame = current_frame.frame_locator(css_selector)
 
@@ -830,6 +855,10 @@ class BrowserContext:
 
 	async def _input_text_element_node(self, element_node: DOMElementNode, text: str):
 		try:
+			# Highlight before typing
+			if element_node.highlight_index is not None:
+				await self._update_state(focus_element=element_node.highlight_index)
+
 			page = await self.get_current_page()
 			element = await self.get_locate_element(element_node)
 
@@ -843,9 +872,7 @@ class BrowserContext:
 			await page.wait_for_load_state()
 
 		except Exception as e:
-			raise Exception(
-				f'Failed to input text into element: {repr(element_node)}. Error: {str(e)}'
-			)
+			raise Exception(f'Failed to input text into element: {repr(element_node)}. Error: {str(e)}')
 
 	async def _click_element_node(self, element_node: DOMElementNode):
 		"""
@@ -854,6 +881,10 @@ class BrowserContext:
 		page = await self.get_current_page()
 
 		try:
+			# Highlight before clicking
+			if element_node.highlight_index is not None:
+				await self._update_state(focus_element=element_node.highlight_index)
+
 			element = await self.get_locate_element(element_node)
 
 			if element is None:
@@ -948,9 +979,7 @@ class BrowserContext:
 			except Exception as e:
 				logger.warning(f'Failed to save cookies: {str(e)}')
 
-	async def is_file_uploader(
-		self, element_node: DOMElementNode, max_depth: int = 3, current_depth: int = 0
-	) -> bool:
+	async def is_file_uploader(self, element_node: DOMElementNode, max_depth: int = 3, current_depth: int = 0) -> bool:
 		"""Check if element or its children are file uploaders"""
 		if current_depth > max_depth:
 			return False
@@ -963,10 +992,7 @@ class BrowserContext:
 
 		# Check for file input attributes
 		if element_node.tag_name == 'input':
-			is_uploader = (
-				element_node.attributes.get('type') == 'file'
-				or element_node.attributes.get('accept') is not None
-			)
+			is_uploader = element_node.attributes.get('type') == 'file' or element_node.attributes.get('accept') is not None
 
 		if is_uploader:
 			return True
@@ -979,3 +1005,12 @@ class BrowserContext:
 						return True
 
 		return False
+
+	async def get_scroll_info(self, page: Page) -> tuple[int, int]:
+		"""Get scroll position information for the current page."""
+		scroll_y = await page.evaluate('window.scrollY')
+		viewport_height = await page.evaluate('window.innerHeight')
+		total_height = await page.evaluate('document.documentElement.scrollHeight')
+		pixels_above = scroll_y
+		pixels_below = total_height - (scroll_y + viewport_height)
+		return pixels_above, pixels_below

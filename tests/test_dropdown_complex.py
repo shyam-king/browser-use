@@ -38,3 +38,7 @@ async def test_dropdown():
 	result = history.final_result()
 	assert result is not None
 	# await browser.close()
+
+
+if __name__ == '__main__':
+	asyncio.run(test_dropdown())

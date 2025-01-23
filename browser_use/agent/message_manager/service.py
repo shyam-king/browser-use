@@ -11,6 +11,7 @@ from langchain_core.messages import (
 	AIMessage,
 	BaseMessage,
 	HumanMessage,
+	ToolMessage,
 )
 from langchain_openai import ChatOpenAI
 
@@ -62,7 +63,7 @@ class MessageManager:
 
 		self._add_message_with_tokens(system_message, MessageTypes.SYSTEM_MESSAGE)
 		self.system_prompt = system_message
-		self.tool_call_in_content = tool_call_in_content
+		self.tool_id = 1
 		tool_calls = [
 			{
 				'name': 'AgentOutput',
@@ -74,27 +75,26 @@ class MessageManager:
 					},
 					'action': [],
 				},
-				'id': '',
+				'id': str(self.tool_id),
 				'type': 'tool_call',
 			}
 		]
-		if self.tool_call_in_content:
-			# openai throws error if tool_calls are not responded -> move to content
-			example_tool_call = AIMessage(
-				content=f'{tool_calls}',
-				tool_calls=[],
-			)
-		else:
-			example_tool_call = AIMessage(
-				content=f'',
-				tool_calls=tool_calls,
-			)
+
+		example_tool_call = AIMessage(
+			content=f'',
+			tool_calls=tool_calls,
+		)
 
 		self._add_message_with_tokens(example_tool_call, MessageTypes.AI_RESPONSE)
 
-		task_message = HumanMessage(content=f'Your task is: {task}')
-		self._add_message_with_tokens(task_message, MessageTypes.ACTION_RESULT)
-	
+		tool_message = ToolMessage(
+			content=f'Your task is: {task}',
+			tool_call_id=str(self.tool_id),
+		)
+
+		self._add_message_with_tokens(tool_message, MessageTypes.ACTION_RESULT)
+
+
 	def _shorten_previous_state_history(self):
 		keep_array = [True] * len(self.history_message_types)
 		n_state_message = 0
@@ -115,6 +115,10 @@ class MessageManager:
 			if keep:
 				self._add_message_with_tokens(old_history.messages[i].message, old_history_message_types[i])
 
+	@staticmethod
+	def task_instructions(task: str) -> HumanMessage:
+		content = f'Your ultimate task is: {task}. If you achieved your ultimate task, stop everything and use the done action in the next step to complete the task. If not, continue as usual.'
+		return HumanMessage(content=content)
 
 	def add_state_message(
 		self,
@@ -163,27 +167,69 @@ class MessageManager:
 			{
 				'name': 'AgentOutput',
 				'args': model_output.model_dump(mode='json', exclude_unset=True),
-				'id': '',
+				'id': str(self.tool_id),
 				'type': 'tool_call',
 			}
 		]
-		if self.tool_call_in_content:
-			msg = AIMessage(
-				content=f'{tool_calls}',
-				tool_calls=[],
-			)
-		else:
-			msg = AIMessage(
-				content='',
-				tool_calls=tool_calls,
-			)
+
+		msg = AIMessage(
+			content='',
+			tool_calls=tool_calls,
+		)
 
 		self._add_message_with_tokens(msg, MessageTypes.AI_RESPONSE)
+		# empty tool response
+		tool_message = ToolMessage(
+			content='',
+			tool_call_id=str(self.tool_id),
+		)
+		self._add_message_with_tokens(tool_message, MessageTypes.ACTION_RESULT)
+		self.tool_id += 1
 
 	def get_messages(self) -> List[BaseMessage]:
 		"""Get current message list, potentially trimmed to max tokens"""
-		self.cut_messages()
-		return [m.message for m in self.history.messages]
+
+		msg = [m.message for m in self.history.messages]
+		# debug which messages are in history with token count # log
+		total_input_tokens = 0
+		logger.debug(f'Messages in history: {len(self.history.messages)}:')
+		for m in self.history.messages:
+			total_input_tokens += m.metadata.input_tokens
+			logger.debug(f'{m.message.__class__.__name__} - Token count: {m.metadata.input_tokens}')
+		logger.debug(f'Total input tokens: {total_input_tokens}')
+
+		return msg
+
+	def _count_tokens(self, message: BaseMessage) -> int:
+		"""Count tokens in a message using the model's tokenizer"""
+		tokens = 0
+		if isinstance(message.content, list):
+			for item in message.content:
+				if 'image_url' in item:
+					tokens += self.IMG_TOKENS
+				elif isinstance(item, dict) and 'text' in item:
+					tokens += self._count_text_tokens(item['text'])
+		else:
+			msg = message.content
+			if hasattr(message, 'tool_calls'):
+				msg += str(message.tool_calls)  # type: ignore
+			tokens += self._count_text_tokens(msg)
+		return tokens
+
+	def _count_text_tokens(self, text: str) -> int:
+		"""Count tokens in a text string"""
+		if isinstance(self.llm, (ChatOpenAI)):
+			try:
+				tokens = self.llm.get_num_tokens(text)
+			except Exception:
+				tokens = (
+					len(text) // self.ESTIMATED_TOKENS_PER_CHARACTER
+				)  # Rough estimate if no tokenizer available
+		else:
+			tokens = (
+				len(text) // self.ESTIMATED_TOKENS_PER_CHARACTER
+			)  # Rough estimate if no tokenizer available
+		return tokens
 
 	def cut_messages(self):
 		"""Get current message list, potentially trimmed to max tokens"""
@@ -218,7 +264,7 @@ class MessageManager:
 		proportion_to_remove = diff / msg.metadata.input_tokens
 		if proportion_to_remove > 0.99:
 			raise ValueError(
-				f'Max token limit reached - history is too long - reduce the system prompt or task less tasks or remove old messages. '
+				f'Max token limit reached - history is too long - reduce the system prompt or task. '
 				f'proportion_to_remove: {proportion_to_remove}'
 			)
 		logger.debug(
@@ -251,30 +297,3 @@ class MessageManager:
 		self.history.add_message(message, metadata)
 		if add_to_message_type_history: self.history_message_types.append(message_type)
 
-	def _count_tokens(self, message: BaseMessage) -> int:
-		"""Count tokens in a message using the model's tokenizer"""
-		tokens = 0
-		if isinstance(message.content, list):
-			for item in message.content:
-				if 'image_url' in item:
-					tokens += self.IMG_TOKENS
-				elif isinstance(item, dict) and 'text' in item:
-					tokens += self._count_text_tokens(item['text'])
-		else:
-			tokens += self._count_text_tokens(message.content)
-		return tokens
-
-	def _count_text_tokens(self, text: str) -> int:
-		"""Count tokens in a text string"""
-		if isinstance(self.llm, (ChatOpenAI, ChatAnthropic)):
-			try:
-				tokens = self.llm.get_num_tokens(text)
-			except Exception:
-				tokens = (
-					len(text) // self.ESTIMATED_TOKENS_PER_CHARACTER
-				)  # Rough estimate if no tokenizer available
-		else:
-			tokens = (
-				len(text) // self.ESTIMATED_TOKENS_PER_CHARACTER
-			)  # Rough estimate if no tokenizer available
-		return tokens

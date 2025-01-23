@@ -35,10 +35,16 @@ class DefaultDomTreeBuilder(AbstractDomTreeBuilder):
 
 	async def build_dom_tree(self, page: Page, **kwargs) -> DOMElementNode:
 		highlight_elements = kwargs.get("highlight_elements", None) or False
+		focus_element = kwargs.get("focus_element", -1)
+		viewport_expansion = kwargs.get("viewport_expansion", 0)
 
-		eval_page = await page.evaluate(
-			self._js_code, [highlight_elements]
-		)  # This is quite big, so be careful
+		args = {
+			'doHighlightElements': highlight_elements,
+			'focusHighlightIndex': focus_element,
+			'viewportExpansion': viewport_expansion,
+		}
+
+		eval_page = await page.evaluate(self._js_code, args)  # This is quite big, so be careful
 		html_to_dict = self._parse_node(eval_page)
 
 		if html_to_dict is None or not isinstance(html_to_dict, DOMElementNode):
@@ -96,8 +102,17 @@ class DomService:
 		self.xpath_cache = {}
 
 	# region - Clickable elements
-	async def get_clickable_elements(self, highlight_elements: bool = True) -> DOMState:
-		element_tree = await self.dom_builder.build_dom_tree(self.page, highlight_elements=highlight_elements)
+	async def get_clickable_elements(self,
+		highlight_elements: bool = True,
+		focus_element: int = -1,
+		viewport_expansion: int = 0) -> DOMState:
+
+		element_tree = await self.dom_builder.build_dom_tree(
+				self.page, 
+				highlight_elements=highlight_elements,
+				foucus_element=focus_element,
+				viewport_expansion=viewport_expansion,
+				)
 		selector_map = self._create_selector_map(element_tree)
 
 		return DOMState(element_tree=element_tree, selector_map=selector_map)
