@@ -1,9 +1,10 @@
 import asyncio
 import json
 import logging
+from typing import Optional, Type
 
 from main_content_extractor import MainContentExtractor
-from playwright.async_api import Page
+from pydantic import BaseModel
 
 from browser_use.agent.views import ActionModel, ActionResult
 from browser_use.browser.context import BrowserContext
@@ -14,6 +15,7 @@ from browser_use.controller.views import (
 	ExtractPageContentAction,
 	GoToUrlAction,
 	InputTextAction,
+	NoParamsAction,
 	OpenTabAction,
 	ScrollAction,
 	SearchGoogleAction,
@@ -29,13 +31,26 @@ class Controller:
 	def __init__(
 		self,
 		exclude_actions: list[str] = [],
+		output_model: Optional[Type[BaseModel]] = None,
 	):
 		self.exclude_actions = exclude_actions
+		self.output_model = output_model
 		self.registry = Registry(exclude_actions)
 		self._register_default_actions()
 
 	def _register_default_actions(self):
 		"""Register all default browser actions"""
+
+		if self.output_model is not None:
+
+			@self.registry.action('Complete task', param_model=self.output_model)
+			async def done(params: BaseModel):
+				return ActionResult(is_done=True, extracted_content=params.model_dump_json())
+		else:
+
+			@self.registry.action('Complete task', param_model=DoneAction)
+			async def done(params: DoneAction):
+				return ActionResult(is_done=True, extracted_content=params.text)
 
 		# Basic Navigation Actions
 		@self.registry.action(
@@ -60,11 +75,9 @@ class Controller:
 			logger.info(msg)
 			return ActionResult(extracted_content=msg, include_in_memory=True)
 
-		@self.registry.action('Go back', requires_browser=True)
-		async def go_back(browser: BrowserContext):
-			page = await browser.get_current_page()
-			await page.go_back()
-			await page.wait_for_load_state()
+		@self.registry.action('Go back', param_model=NoParamsAction, requires_browser=True)
+		async def go_back(_: NoParamsAction, browser: BrowserContext):
+			await browser.go_back()
 			msg = '🔙  Navigated back'
 			logger.info(msg)
 			return ActionResult(extracted_content=msg, include_in_memory=True)
@@ -90,8 +103,11 @@ class Controller:
 			msg = None
 
 			try:
-				await browser._click_element_node(element_node)
-				msg = f'🖱️  Clicked button with index {params.index}: {element_node.get_all_text_till_next_clickable_element(max_depth=2)}'
+				download_path = await browser._click_element_node(element_node)
+				if download_path:
+					msg = f'💾  Downloaded file to {download_path}'
+				else:
+					msg = f'🖱️  Clicked button with index {params.index}: {element_node.get_all_text_till_next_clickable_element(max_depth=2)}'
 
 				logger.info(msg)
 				logger.debug(f'Element xpath: {element_node.xpath}')
@@ -102,7 +118,7 @@ class Controller:
 					await browser.switch_to_tab(-1)
 				return ActionResult(extracted_content=msg, include_in_memory=True)
 			except Exception as e:
-				logger.warning(f'Element no longer available with index {params.index} - most likely the page changed')
+				logger.warning(f'Element not clickable with index {params.index} - most likely the page changed')
 				return ActionResult(error=str(e))
 
 		@self.registry.action(
@@ -158,10 +174,6 @@ class Controller:
 			msg = f'📄  Extracted page as {output_format}\n: {content}\n'
 			logger.info(msg)
 			return ActionResult(extracted_content=msg)
-
-		@self.registry.action('Complete task', param_model=DoneAction)
-		async def done(params: DoneAction):
-			return ActionResult(is_done=True, extracted_content=params.text)
 
 		@self.registry.action(
 			'Scroll down the page by pixel amount - if no amount is specified, scroll down one page',

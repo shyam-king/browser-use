@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import platform
+import re
 import textwrap
 import uuid
 from io import BytesIO
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type, TypeVar
 
 from dotenv import load_dotenv
+from google.api_core.exceptions import ResourceExhausted
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
 	BaseMessage,
@@ -73,6 +75,7 @@ class Agent:
 		system_prompt_class: Type[SystemPrompt] = SystemPrompt,
 		max_input_tokens: int = 128000,
 		validate_output: bool = False,
+		message_context: Optional[str] = None,
 		generate_gif: bool | str = True,
 		include_attributes: list[str] = [
 			'title',
@@ -114,6 +117,7 @@ class Agent:
 		# Browser setup
 		self.injected_browser = browser is not None
 		self.injected_browser_context = browser_context is not None
+		self.message_context = message_context
 
 		# Initialize browser first if needed
 		self.browser = browser if browser is not None else (None if browser_context else Browser())
@@ -151,6 +155,7 @@ class Agent:
 			include_attributes=self.include_attributes,
 			max_error_length=self.max_error_length,
 			max_actions_per_step=self.max_actions_per_step,
+			message_context=self.message_context,
 		)
 
 		# Step callback
@@ -216,17 +221,27 @@ class Agent:
 				return 'function_calling'
 			else:
 				return None
+		else:
+			return tool_calling_method
+
+	def add_new_task(self, new_task: str) -> None:
+		self.message_manager.add_new_task(new_task)
 
 	@time_execution_async('--step')
 	async def step(self, step_info: Optional[AgentStepInfo] = None) -> None:
 		"""Execute one step of the task"""
-		logger.info(f'\n📍 Step {self.n_steps}')
+		logger.info(f'📍 Step {self.n_steps}')
 		state = None
 		model_output = None
 		result: list[ActionResult] = []
 
 		try:
 			state = await self.browser_context.get_state(use_vision=self.use_vision)
+
+			if self._stopped or self._paused:
+				logger.debug('Agent paused after getting state')
+				raise InterruptedError
+
 			self.message_manager.add_state_message(state, self._last_result, step_info)
 			input_messages = self.message_manager.get_messages()
 
@@ -238,6 +253,11 @@ class Agent:
 
 				self._save_conversation(input_messages, model_output)
 				self.message_manager._shorten_previous_state_history()
+
+				if self._stopped or self._paused:
+					logger.debug('Agent paused after getting next action')
+					raise InterruptedError
+
 				self.message_manager.add_model_output(model_output)
 			except Exception as e:
 				# model call failed, remove last state message from history
@@ -252,6 +272,9 @@ class Agent:
 
 			self.consecutive_failures = 0
 
+		except InterruptedError:
+			logger.debug('Agent paused')
+			return
 		except Exception as e:
 			result = await self._handle_step_error(e)
 			self._last_result = result
@@ -291,7 +314,7 @@ class Agent:
 				error_msg += '\n\nReturn a valid JSON object with the required fields.'
 
 			self.consecutive_failures += 1
-		elif isinstance(error, RateLimitError):
+		elif isinstance(error, RateLimitError) or isinstance(error, ResourceExhausted):
 			logger.warning(f'{prefix}{error_msg}')
 			await asyncio.sleep(self.retry_delay)
 			self.consecutive_failures += 1
@@ -328,17 +351,36 @@ class Agent:
 
 		self.history.history.append(history_item)
 
+	THINK_TAGS = re.compile(r'<think>.*?</think>', re.DOTALL)
+
+	def _remove_think_tags(self, text: str) -> str:
+		"""Remove think tags from text"""
+		return re.sub(self.THINK_TAGS, '', text)
+
 	@time_execution_async('--get_next_action')
 	async def get_next_action(self, input_messages: list[BaseMessage]) -> AgentOutput:
 		"""Get next action from LLM based on current state"""
-		if self.tool_calling_method is None:
+		if self.model_name == 'deepseek-reasoner' or self.model_name.startswith('deepseek-r1'):
+			converted_input_messages = self.message_manager.convert_messages_for_non_function_calling_models(input_messages)
+			merged_input_messages = self.message_manager.merge_successive_human_messages(converted_input_messages)
+			output = self.llm.invoke(merged_input_messages)
+			output.content = self._remove_think_tags(output.content)
+			# TODO: currently invoke does not return reasoning_content, we should override invoke
+			try:
+				parsed_json = self.message_manager.extract_json_from_model_output(output.content)
+				parsed = self.AgentOutput(**parsed_json)
+			except (ValueError, ValidationError) as e:
+				logger.warning(f'Failed to parse model output: {output} {str(e)}')
+				raise ValueError('Could not parse response.')
+		elif self.tool_calling_method is None:
 			structured_llm = self.llm.with_structured_output(self.AgentOutput, include_raw=True)
+			response: dict[str, Any] = await structured_llm.ainvoke(input_messages)  # type: ignore
+			parsed: AgentOutput | None = response['parsed']
 		else:
 			structured_llm = self.llm.with_structured_output(self.AgentOutput, include_raw=True, method=self.tool_calling_method)
+			response: dict[str, Any] = await structured_llm.ainvoke(input_messages)  # type: ignore
+			parsed: AgentOutput | None = response['parsed']
 
-		response: dict[str, Any] = await structured_llm.ainvoke(input_messages)  # type: ignore
-
-		parsed: AgentOutput | None = response['parsed']
 		if parsed is None:
 			raise ValueError('Could not parse response.')
 
@@ -495,7 +537,6 @@ class Agent:
 			await asyncio.sleep(0.2)  # Small delay to prevent CPU spinning
 			if self._stopped:  # Allow stopping while paused
 				return False
-
 		return True
 
 	async def _validate_output(self) -> bool:
@@ -559,6 +600,10 @@ class Agent:
 		Returns:
 		        List of action results
 		"""
+		# Execute initial actions if provided
+		if self.initial_actions:
+			await self.controller.multi_act(self.initial_actions, self.browser_context, check_for_new_elements=False)
+
 		results = []
 
 		for i, history_item in enumerate(history.history):
@@ -1066,7 +1111,7 @@ class Agent:
 
 	def pause(self) -> None:
 		"""Pause the agent before the next step"""
-		logger.info('🔄 Agent pausing before next step')
+		logger.info('🔄 pausing Agent ')
 		self._paused = True
 
 	def resume(self) -> None:

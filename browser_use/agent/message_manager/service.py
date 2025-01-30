@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
+import json
 import logging
 from datetime import datetime
 from typing import List, Optional, Type
@@ -11,6 +12,7 @@ from langchain_core.messages import (
 	AIMessage,
 	BaseMessage,
 	HumanMessage,
+	SystemMessage,
 	ToolMessage,
 )
 from langchain_openai import ChatOpenAI
@@ -36,12 +38,12 @@ class MessageManager:
 		action_descriptions: str,
 		system_prompt_class: Type[SystemPrompt],
 		max_input_tokens: int = 128000,
-		estimated_tokens_per_character: int = 3,
+		estimated_characters_per_token: int = 3,
 		image_tokens: int = 800,
 		include_attributes: list[str] = [],
 		max_error_length: int = 400,
 		max_actions_per_step: int = 10,
-		tool_call_in_content: bool = True,
+		message_context: Optional[str] = None,
 	):
 		self.llm = llm
 		self.system_prompt_class = system_prompt_class
@@ -50,10 +52,11 @@ class MessageManager:
 		self.history_message_types: List[MessageTypes] = []
 		self.task = task
 		self.action_descriptions = action_descriptions
-		self.ESTIMATED_TOKENS_PER_CHARACTER = estimated_tokens_per_character
+		self.estimated_characters_per_token = estimated_characters_per_token
 		self.IMG_TOKENS = image_tokens
 		self.include_attributes = include_attributes
 		self.max_error_length = max_error_length
+		self.message_context = message_context
 
 		system_message = self.system_prompt_class(
 			self.action_descriptions,
@@ -63,6 +66,13 @@ class MessageManager:
 
 		self._add_message_with_tokens(system_message, MessageTypes.SYSTEM_MESSAGE)
 		self.system_prompt = system_message
+
+		if self.message_context:
+			context_message = HumanMessage(content=self.message_context)
+			self._add_message_with_tokens(context_message, MessageTypes.HumanMessage)
+
+		task_message = self.task_instructions(task)
+		self._add_message_with_tokens(task_message, MessageTypes.HumanMessage)
 		self.tool_id = 1
 		tool_calls = [
 			{
@@ -71,7 +81,7 @@ class MessageManager:
 					'current_state': {
 						'evaluation_previous_goal': 'Unknown - No previous actions to evaluate.',
 						'memory': '',
-						'next_goal': 'Obtain task from user',
+						'next_goal': 'Start browser',
 					},
 					'action': [],
 				},
@@ -88,11 +98,12 @@ class MessageManager:
 		self._add_message_with_tokens(example_tool_call, MessageTypes.AI_RESPONSE)
 
 		tool_message = ToolMessage(
-			content=f'Your task is: {task}',
+			content=f'Browser started',
 			tool_call_id=str(self.tool_id),
 		)
 
 		self._add_message_with_tokens(tool_message, MessageTypes.ACTION_RESULT)
+		self.tool_id += 1
 
 
 	def _shorten_previous_state_history(self):
@@ -120,6 +131,13 @@ class MessageManager:
 		content = f'Your ultimate task is: {task}. If you achieved your ultimate task, stop everything and use the done action in the next step to complete the task. If not, continue as usual.'
 		return HumanMessage(content=content)
 
+	def add_new_task(self, new_task: str) -> None:
+		content = (
+			f'Your new ultimate task is: {new_task}. Take the previous context into account and finish your new ultimate task. '
+		)
+		msg = HumanMessage(content=content)
+		self._add_message_with_tokens(msg, MessageTypes.HumanMessage)
+
 	def add_state_message(
 		self,
 		state: BrowserState,
@@ -138,9 +156,7 @@ class MessageManager:
 						msg = HumanMessage(content='Action result: ' + str(r.extracted_content))
 						self._add_message_with_tokens(msg, MessageTypes.ACTION_RESULT)
 					if r.error:
-						msg = HumanMessage(
-							content='Action error: ' + str(r.error)[-self.max_error_length :]
-						)
+						msg = HumanMessage(content='Action error: ' + str(r.error)[-self.max_error_length :])
 						self._add_message_with_tokens(msg, MessageTypes.ACTION_RESULT)
 					result = None  # if result in history, we dont want to add it again
 
@@ -156,9 +172,7 @@ class MessageManager:
 
 	def _remove_last_state_message(self) -> None:
 		"""Remove last state message from history"""
-		if len(self.history.messages) > 2 and isinstance(
-			self.history.messages[-1].message, HumanMessage
-		):
+		if len(self.history.messages) > 2 and isinstance(self.history.messages[-1].message, HumanMessage):
 			self.history.remove_message()
 
 	def add_model_output(self, model_output: AgentOutput) -> None:
@@ -218,17 +232,8 @@ class MessageManager:
 
 	def _count_text_tokens(self, text: str) -> int:
 		"""Count tokens in a text string"""
-		if isinstance(self.llm, (ChatOpenAI)):
-			try:
-				tokens = self.llm.get_num_tokens(text)
-			except Exception:
-				tokens = (
-					len(text) // self.ESTIMATED_TOKENS_PER_CHARACTER
-				)  # Rough estimate if no tokenizer available
-		else:
-			tokens = (
-				len(text) // self.ESTIMATED_TOKENS_PER_CHARACTER
-			)  # Rough estimate if no tokenizer available
+
+		tokens = len(text) // self.estimated_characters_per_token  # Rough estimate if no tokenizer available
 		return tokens
 
 	def cut_messages(self):
@@ -297,3 +302,58 @@ class MessageManager:
 		self.history.add_message(message, metadata)
 		if add_to_message_type_history: self.history_message_types.append(message_type)
 
+	def convert_messages_for_non_function_calling_models(self, input_messages: list[BaseMessage]) -> list[BaseMessage]:
+		"""Convert messages for non-function-calling models"""
+		output_messages = []
+		for message in input_messages:
+			if isinstance(message, HumanMessage):
+				output_messages.append(message)
+			elif isinstance(message, SystemMessage):
+				output_messages.append(message)
+			elif isinstance(message, ToolMessage):
+				output_messages.append(HumanMessage(content=message.content))
+			elif isinstance(message, AIMessage):
+				# check if tool_calls is a valid JSON object
+				if message.tool_calls:
+					tool_calls = json.dumps(message.tool_calls)
+					output_messages.append(AIMessage(content=tool_calls))
+				else:
+					output_messages.append(message)
+			else:
+				raise ValueError(f'Unknown message type: {type(message)}')
+		return output_messages
+
+	def merge_successive_human_messages(self, messages: list[BaseMessage]) -> list[BaseMessage]:
+		"""Some models like deepseek-reasoner dont allow multiple human messages in a row. This function merges them into one."""
+		merged_messages = []
+		streak = 0
+		for message in messages:
+			if isinstance(message, HumanMessage):
+				streak += 1
+				if streak > 1:
+					if isinstance(message.content, list):
+						merged_messages[-1].content += message.content[0]['text']
+					else:
+						merged_messages[-1].content += message.content
+				else:
+					merged_messages.append(message)
+			else:
+				merged_messages.append(message)
+				streak = 0
+		return merged_messages
+
+	def extract_json_from_model_output(self, content: str) -> dict:
+		"""Extract JSON from model output, handling both plain JSON and code-block-wrapped JSON."""
+		try:
+			# If content is wrapped in code blocks, extract just the JSON part
+			if '```' in content:
+				# Find the JSON content between code blocks
+				content = content.split('```')[1]
+				# Remove language identifier if present (e.g., 'json\n')
+				if '\n' in content:
+					content = content.split('\n', 1)[1]
+			# Parse the cleaned content
+			return json.loads(content)
+		except json.JSONDecodeError as e:
+			logger.warning(f'Failed to parse model output: {content} {str(e)}')
+			raise ValueError('Could not parse response.')

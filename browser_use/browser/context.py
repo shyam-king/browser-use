@@ -23,8 +23,8 @@ from playwright.async_api import (
 	Page,
 )
 
-from browser_use.browser.views import BrowserError, BrowserState, TabInfo
 from browser_use.dom.service import AbstractDomTreeBuilder, DomService
+from browser_use.browser.views import BrowserError, BrowserState, TabInfo, URLNotAllowedError
 from browser_use.dom.views import DOMElementNode, SelectorMap
 from browser_use.utils import time_execution_sync
 
@@ -72,8 +72,12 @@ class BrowserContextConfig:
 
 		no_viewport: False
 			Disable viewport
+
 		save_recording_path: None
 			Path to save video recordings
+
+		save_downloads_path: None
+	        Path to save downloads to
 
 		trace_path: None
 			Path to save trace files. It will auto name the file with the TRACE_PATH/{context_id}.zip
@@ -92,6 +96,10 @@ class BrowserContextConfig:
 
 		viewport_expansion: 500
 			Viewport expansion in pixels. This amount will increase the number of elements which are included in the state what the LLM will see. If set to -1, all elements will be included (this leads to high token usage). If set to 0, only the elements which are visible in the viewport will be included.
+
+		allowed_domains: None
+			List of allowed domains that can be accessed. If None, all domains are allowed.
+			Example: ['example.com', 'api.example.com']
 	"""
 
 	cookies_file: str | None = None
@@ -106,6 +114,7 @@ class BrowserContextConfig:
 	no_viewport: Optional[bool] = None
 
 	save_recording_path: str | None = None
+	save_downloads_path: str | None = None
 	trace_path: str | None = None
 	locale: str | None = None
 	user_agent: str = (
@@ -114,6 +123,7 @@ class BrowserContextConfig:
 
 	highlight_elements: bool = True
 	viewport_expansion: int = 500
+	allowed_domains: list[str] | None = None
 
 	custom_dom_builder: Optional[AbstractDomTreeBuilder] = None
 
@@ -196,23 +206,7 @@ class BrowserContext:
 		page = await context.new_page()
 
 		# Instead of calling _update_state(), create an empty initial state
-		initial_state = BrowserState(
-			element_tree=DOMElementNode(
-				tag_name='root',
-				is_visible=True,
-				parent=None,
-				xpath='',
-				attributes={},
-				children=[],
-			),
-			selector_map={},
-			url=page.url,
-			title='',
-			screenshot=None,
-			tabs=[],
-			pixels_above=0,
-			pixels_below=0,
-		)
+		initial_state = self._get_initial_state(page)
 
 		self.session = BrowserSession(
 			context=context,
@@ -258,6 +252,7 @@ class BrowserContext:
 				bypass_csp=self.config.disable_security,
 				ignore_https_errors=self.config.disable_security,
 				record_video_dir=self.config.save_recording_path,
+				record_video_size=self.config.browser_window_size,
 				locale=self.config.locale,
 			)
 
@@ -281,7 +276,7 @@ class BrowserContext:
 
 			// Languages
 			Object.defineProperty(navigator, 'languages', {
-				get: () => ['en-US', 'en']
+				get: () => ['en-US']
 			});
 
 			// Plugins
@@ -483,15 +478,20 @@ class BrowserContext:
 		"""
 		Ensures page is fully loaded before continuing.
 		Waits for either network to be idle or minimum WAIT_TIME, whichever is longer.
+		Also checks if the loaded URL is allowed.
 		"""
 		# Start timing
 		start_time = time.time()
 
-		# await asyncio.sleep(self.minimum_wait_page_load_time)
-
 		# Wait for page load
 		try:
 			await self._wait_for_stable_network()
+
+			# Check if the loaded URL is allowed
+			page = await self.get_current_page()
+			await self._check_and_handle_navigation(page)
+		except URLNotAllowedError as e:
+			raise e
 		except Exception:
 			logger.warning('Page load failed, continuing...')
 			pass
@@ -506,8 +506,45 @@ class BrowserContext:
 		if remaining > 0:
 			await asyncio.sleep(remaining)
 
+	def _is_url_allowed(self, url: str) -> bool:
+		"""Check if a URL is allowed based on the whitelist configuration."""
+		if not self.config.allowed_domains:
+			return True
+
+		try:
+			from urllib.parse import urlparse
+
+			parsed_url = urlparse(url)
+			domain = parsed_url.netloc.lower()
+
+			# Remove port number if present
+			if ':' in domain:
+				domain = domain.split(':')[0]
+
+			# Check if domain matches any allowed domain pattern
+			return any(
+				domain == allowed_domain.lower() or domain.endswith('.' + allowed_domain.lower())
+				for allowed_domain in self.config.allowed_domains
+			)
+		except Exception as e:
+			logger.error(f'Error checking URL allowlist: {str(e)}')
+			return False
+
+	async def _check_and_handle_navigation(self, page: Page) -> None:
+		"""Check if current page URL is allowed and handle if not."""
+		if not self._is_url_allowed(page.url):
+			logger.warning(f'Navigation to non-allowed URL detected: {page.url}')
+			try:
+				await self.go_back()
+			except Exception as e:
+				logger.error(f'Failed to go back after detecting non-allowed URL: {str(e)}')
+			raise URLNotAllowedError(f'Navigation to non-allowed URL: {page.url}')
+
 	async def navigate_to(self, url: str):
 		"""Navigate to a URL"""
+		if not self._is_url_allowed(url):
+			raise BrowserError(f'Navigation to non-allowed URL: {url}')
+
 		page = await self.get_current_page()
 		await page.goto(url)
 		await page.wait_for_load_state()
@@ -521,14 +558,22 @@ class BrowserContext:
 	async def go_back(self):
 		"""Navigate back in history"""
 		page = await self.get_current_page()
-		await page.go_back()
-		await page.wait_for_load_state()
+		try:
+			# 10 ms timeout
+			await page.go_back(timeout=10, wait_until='domcontentloaded')
+			# await self._wait_for_page_and_frames_load(timeout_overwrite=1.0)
+		except Exception as e:
+			# Continue even if its not fully loaded, because we wait later for the page to load
+			logger.debug(f'During go_back: {e}')
 
 	async def go_forward(self):
 		"""Navigate forward in history"""
 		page = await self.get_current_page()
-		await page.go_forward()
-		await page.wait_for_load_state()
+		try:
+			await page.go_forward(timeout=10, wait_until='domcontentloaded')
+		except Exception as e:
+			# Continue even if its not fully loaded, because we wait later for the page to load
+			logger.debug(f'During go_forward: {e}')
 
 	async def close_current_tab(self):
 		"""Close the current tab"""
@@ -598,6 +643,7 @@ class BrowserContext:
 			if use_vision:
 				screenshot_b64 = await self.take_screenshot()
 			pixels_above, pixels_below = await self.get_scroll_info(page)
+
 			self.current_state = BrowserState(
 				element_tree=content.element_tree,
 				selector_map=content.selector_map,
@@ -874,7 +920,7 @@ class BrowserContext:
 		except Exception as e:
 			raise Exception(f'Failed to input text into element: {repr(element_node)}. Error: {str(e)}')
 
-	async def _click_element_node(self, element_node: DOMElementNode):
+	async def _click_element_node(self, element_node: DOMElementNode) -> Optional[str]:
 		"""
 		Optimized method to click an element using xpath.
 		"""
@@ -890,18 +936,47 @@ class BrowserContext:
 			if element is None:
 				raise Exception(f'Element: {repr(element_node)} not found')
 
+			async def perform_click(click_func):
+				"""Performs the actual click, handling both download
+				and navigation scenarios."""
+				if self.config.save_downloads_path:
+					try:
+						# Try short-timeout expect_download to detect a file download has been been triggered
+						async with page.expect_download(timeout=5000) as download_info:
+							await click_func()
+						download = await download_info.value
+						# If the download succeeds, save to disk
+						download_path = os.path.join(self.config.save_downloads_path, download.suggested_filename)
+						await download.save_as(download_path)
+						logger.debug(f'Download triggered. Saved file to: {download_path}')
+						return download_path
+					except TimeoutError:
+						# If no download is triggered, treat as normal click
+						logger.debug('No download triggered within timeout. Checking navigation...')
+						await page.wait_for_load_state()
+						await self._check_and_handle_navigation(page)
+				else:
+					# Standard click logic if no download is expected
+					await click_func()
+					await page.wait_for_load_state()
+					await self._check_and_handle_navigation(page)
+
 			# await element.scroll_into_view_if_needed()
 
 			try:
-				await element.click(timeout=1500)
-				await page.wait_for_load_state()
+				return await perform_click(lambda: element.click(timeout=1500))
+			except URLNotAllowedError as e:
+				raise e
 			except Exception:
 				try:
-					await page.evaluate('(el) => el.click()', element)
-					await page.wait_for_load_state()
+					return await perform_click(lambda: page.evaluate('(el) => el.click()', element))
+				except URLNotAllowedError as e:
+					raise e
 				except Exception as e:
 					raise Exception(f'Failed to click element: {str(e)}')
 
+		except URLNotAllowedError as e:
+			raise e
 		except Exception as e:
 			raise Exception(f'Failed to click element: {repr(element_node)}. Error: {str(e)}')
 
@@ -928,6 +1003,11 @@ class BrowserContext:
 			raise BrowserError(f'No tab found with page_id: {page_id}')
 
 		page = pages[page_id]
+
+		# Check if the tab's URL is allowed before switching
+		if not self._is_url_allowed(page.url):
+			raise BrowserError(f'Cannot switch to tab with non-allowed URL: {page.url}')
+
 		session.current_page = page
 
 		await page.bring_to_front()
@@ -935,6 +1015,9 @@ class BrowserContext:
 
 	async def create_new_tab(self, url: str | None = None) -> None:
 		"""Create a new tab and optionally navigate to a URL"""
+		if url and not self._is_url_allowed(url):
+			raise BrowserError(f'Cannot create new tab with non-allowed URL: {url}')
+
 		session = await self.get_session()
 		new_page = await session.context.new_page()
 		session.current_page = new_page
@@ -1014,3 +1097,35 @@ class BrowserContext:
 		pixels_above = scroll_y
 		pixels_below = total_height - (scroll_y + viewport_height)
 		return pixels_above, pixels_below
+
+	async def reset_context(self):
+		"""Reset the browser session
+		Call this when you don't want to kill the context but just kill the state
+		"""
+		# close all tabs and clear cached state
+		session = await self.get_session()
+
+		pages = session.context.pages
+		for page in pages:
+			await page.close()
+
+		session.cached_state = self._get_initial_state()
+		session.current_page = await session.context.new_page()
+
+	def _get_initial_state(self, page: Optional[Page] = None) -> BrowserState:
+		"""Get the initial state of the browser"""
+		return BrowserState(
+			element_tree=DOMElementNode(
+				tag_name='root',
+				is_visible=True,
+				parent=None,
+				xpath='',
+				attributes={},
+				children=[],
+			),
+			selector_map={},
+			url=page.url if page else '',
+			title='',
+			screenshot=None,
+			tabs=[],
+		)
