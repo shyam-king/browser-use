@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 class MessageTypes(Enum):
 	SYSTEM_MESSAGE = "system_message"
+	HUMAN_MESSAGE = "human_message"
 	STATE = "state"
 	AI_RESPONSE = "ai_response"
 	ACTION_RESULT = "action_result"
@@ -69,10 +70,10 @@ class MessageManager:
 
 		if self.message_context:
 			context_message = HumanMessage(content=self.message_context)
-			self._add_message_with_tokens(context_message, MessageTypes.HumanMessage)
+			self._add_message_with_tokens(context_message, MessageTypes.HUMAN_MESSAGE)
 
 		task_message = self.task_instructions(task)
-		self._add_message_with_tokens(task_message, MessageTypes.HumanMessage)
+		self._add_message_with_tokens(task_message, MessageTypes.HUMAN_MESSAGE)
 		self.tool_id = 1
 		tool_calls = [
 			{
@@ -136,7 +137,7 @@ class MessageManager:
 			f'Your new ultimate task is: {new_task}. Take the previous context into account and finish your new ultimate task. '
 		)
 		msg = HumanMessage(content=content)
-		self._add_message_with_tokens(msg, MessageTypes.HumanMessage)
+		self._add_message_with_tokens(msg, MessageTypes.HUMAN_MESSAGE)
 
 	def add_state_message(
 		self,
