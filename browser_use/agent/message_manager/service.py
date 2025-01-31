@@ -4,6 +4,7 @@ import json
 import logging
 from datetime import datetime
 from typing import List, Optional, Type
+import typing
 
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
@@ -289,16 +290,48 @@ class MessageManager:
 
 	def merge_successive_human_messages(self, messages: list[BaseMessage]) -> list[BaseMessage]:
 		"""Some models like deepseek-reasoner dont allow multiple human messages in a row. This function merges them into one."""
-		merged_messages = []
+		merged_messages: typing.List[BaseMessage] = []
 		streak = 0
 		for message in messages:
 			if isinstance(message, HumanMessage):
 				streak += 1
 				if streak > 1:
-					if isinstance(message.content, list):
-						merged_messages[-1].content += message.content[0]['text']
+					prev_content = merged_messages[-1].content
+					current_content = message.content
+
+					new_content = []
+					
+					if not isinstance(prev_content, list):
+						prev_text = prev_content
 					else:
-						merged_messages[-1].content += message.content
+						prev_text_entries = list(filter(lambda x: x["type"] == "text", prev_content))
+						if len(prev_text_entries) > 0:
+							prev_text = prev_text_entries[0].get("text")
+						else:
+							prev_text = ""
+
+					if not isinstance(current_content, list):
+						current_text = current_content
+					else:
+						current_text_entries = list(filter(lambda x: x["type"] == "text", current_content))
+						if len(current_text_entries) > 0:
+							current_text = current_text_entries[0].get("text")
+						else:
+							current_text = ""
+
+					new_text = prev_text + current_text
+
+					new_content.append({"type": "text", "text": new_text})
+
+					if isinstance(prev_content, list):
+						for entry in prev_content:
+							if entry["type"] != "text":
+								new_content.append(entry)
+
+					if isinstance(current_content, list):
+						for entry in current_content:
+							if entry["type"] != "text":
+								new_content.append(entry)
 				else:
 					merged_messages.append(message)
 			else:

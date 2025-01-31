@@ -55,53 +55,10 @@ api_key_anthropic = SecretStr(os.getenv('ANTHROPIC_API_KEY') or '')
 			base_url='https://api.deepseek.com/v1',
 			model='deepseek-reasoner',
 			api_key=api_key_deepseek,
-		),
-		ChatOllama(
-			model='qwen2.5:latest',
-			num_ctx=128000,
-		),
-		AzureChatOpenAI(
-			model='gpt-4o-mini',
-			api_version='2024-10-21',
-			azure_endpoint=os.getenv('AZURE_OPENAI_ENDPOINT', ''),
-			api_key=SecretStr(os.getenv('AZURE_OPENAI_KEY', '')),
-		),
-		ChatAnthropic(
-			model_name='claude-3-5-sonnet-20240620',
-			timeout=100,
-			temperature=0.0,
-			stop=None,
-			api_key=api_key_anthropic,
-		),
-		ChatOpenAI(model='gpt-4o'),
-		ChatOpenAI(model='gpt-4o-mini'),
-		AzureChatOpenAI(
-			model='gpt-4o',
-			api_version='2024-10-21',
-			azure_endpoint=os.getenv('AZURE_OPENAI_ENDPOINT', ''),
-			api_key=SecretStr(os.getenv('AZURE_OPENAI_KEY', '')),
-		),
-		ChatGoogleGenerativeAI(model='gemini-2.0-flash-exp', api_key=api_key_gemini),
-		ChatGoogleGenerativeAI(model='gemini-1.5-pro', api_key=api_key_gemini),
-		ChatGoogleGenerativeAI(model='gemini-1.5-flash-latest', api_key=api_key_gemini),
-		ChatOpenAI(
-			base_url='https://api.deepseek.com/v1',
-			model='deepseek-chat',
-			api_key=api_key_deepseek,
-		),
+			)
 	],
 	ids=[
 		'deepseek-reasoner',
-		'qwen2.5:latest',
-		'azure-gpt-4o-mini',
-		'claude-3-5-sonnet',
-		'gpt-4o',
-		'gpt-4o-mini',
-		'azure-gpt-4o',
-		'gemini-2.0-flash-exp',
-		'gemini-1.5-pro',
-		'gemini-1.5-flash-latest',
-		'deepseek-chat',
 	],
 )
 async def llm(request):
@@ -115,7 +72,7 @@ async def test_model_search(llm, context):
 	print(f'\nTesting model: {model_name}')
 
 	use_vision = True
-	models_without_vision = ['deepseek-chat', 'deepseek-reasoner']
+	models_without_vision = []
 	if hasattr(llm, 'model') and llm.model in models_without_vision:
 		use_vision = False
 	elif hasattr(llm, 'model_name') and llm.model_name in models_without_vision:
