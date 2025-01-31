@@ -716,7 +716,9 @@ class BrowserContext:
 	# endregion
 
 	# region - User Actions
-	def _convert_simple_xpath_to_css_selector(self, xpath: str) -> str:
+
+	@classmethod
+	def _convert_simple_xpath_to_css_selector(cls, xpath: str) -> str:
 		"""Converts simple XPath expressions to CSS selectors."""
 		if not xpath:
 			return ''
@@ -763,7 +765,8 @@ class BrowserContext:
 		base_selector = ' > '.join(css_parts)
 		return base_selector
 
-	def _enhanced_css_selector_for_element(self, element: DOMElementNode) -> str:
+	@classmethod
+	def _enhanced_css_selector_for_element(cls, element: DOMElementNode) -> str:
 		"""
 		Creates a CSS selector for a DOM element, handling various edge cases and special characters.
 
@@ -775,7 +778,7 @@ class BrowserContext:
 		"""
 		try:
 			# Get base selector from XPath
-			css_selector = self._convert_simple_xpath_to_css_selector(element.xpath)
+			css_selector = cls._convert_simple_xpath_to_css_selector(element.xpath)
 
 			# Handle class attributes
 			if 'class' in element.attributes and element.attributes['class']:
@@ -864,7 +867,7 @@ class BrowserContext:
 			tag_name = element.tag_name or '*'
 			return f"{tag_name}[highlight_index='{element.highlight_index}']"
 
-	async def get_locate_element(self, element: DOMElementNode) -> ElementHandle | None:
+	async def get_locate_element(self, element: DOMElementNode) -> Optional[ElementHandle]:
 		current_frame = await self.get_current_page()
 
 		# Start with the target element and collect all parents
@@ -888,13 +891,15 @@ class BrowserContext:
 
 		try:
 			if isinstance(current_frame, FrameLocator):
-				return await current_frame.locator(css_selector).element_handle()
+				element_handle = await current_frame.locator(css_selector).element_handle()
+				return element_handle
 			else:
 				# Try to scroll into view if hidden
 				element_handle = await current_frame.query_selector(css_selector)
 				if element_handle:
 					await element_handle.scroll_into_view_if_needed()
 					return element_handle
+				return None
 		except Exception as e:
 			logger.error(f'Failed to locate element: {str(e)}')
 			return None
@@ -906,15 +911,15 @@ class BrowserContext:
 				await self._update_state(focus_element=element_node.highlight_index)
 
 			page = await self.get_current_page()
-			element = await self.get_locate_element(element_node)
+			element_handle = await self.get_locate_element(element_node)
 
-			if element is None:
+			if element_handle is None:
 				raise Exception(f'Element: {repr(element_node)} not found')
 
-			await element.scroll_into_view_if_needed(timeout=2500)
-			await element.fill('')
-			await element.type(text)
-			await element.press('Tab')
+			await element_handle.scroll_into_view_if_needed(timeout=2500)
+			await element_handle.fill('')
+			await element_handle.type(text)
+			await element_handle.press('Tab')
 			await page.wait_for_load_state()
 
 		except Exception as e:
@@ -931,9 +936,9 @@ class BrowserContext:
 			if element_node.highlight_index is not None:
 				await self._update_state(focus_element=element_node.highlight_index)
 
-			element = await self.get_locate_element(element_node)
+			element_handle = await self.get_locate_element(element_node)
 
-			if element is None:
+			if element_handle is None:
 				raise Exception(f'Element: {repr(element_node)} not found')
 
 			async def perform_click(click_func):
@@ -961,15 +966,13 @@ class BrowserContext:
 					await page.wait_for_load_state()
 					await self._check_and_handle_navigation(page)
 
-			# await element.scroll_into_view_if_needed()
-
 			try:
-				return await perform_click(lambda: element.click(timeout=1500))
+				return await perform_click(lambda: element_handle.click(timeout=1500))
 			except URLNotAllowedError as e:
 				raise e
 			except Exception:
 				try:
-					return await perform_click(lambda: page.evaluate('(el) => el.click()', element))
+					return await perform_click(lambda: page.evaluate('(el) => el.click()', element_handle))
 				except URLNotAllowedError as e:
 					raise e
 				except Exception as e:
@@ -1039,7 +1042,8 @@ class BrowserContext:
 
 	async def get_element_by_index(self, index: int) -> ElementHandle | None:
 		selector_map = await self.get_selector_map()
-		return await self.get_locate_element(selector_map[index])
+		element_handle = await self.get_locate_element(selector_map[index])
+		return element_handle
 
 	async def get_dom_element_by_index(self, index: int) -> DOMElementNode | None:
 		selector_map = await self.get_selector_map()
